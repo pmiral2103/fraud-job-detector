@@ -10,29 +10,80 @@ interface AnalysisResult {
   riskLevel: RiskLevel;
   reasons: string[];
   recommendation: string;
+  detailedRecommendation: string;
 }
+
+const API_URL = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000';
 
 function App() {
   const [input, setInput] = useState('');
   const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<AnalysisResult | null>(null);
 
-  const handleAnalyze = () => {
+  const handleAnalyze = async () => {
     if (!input.trim()) return;
 
     setIsAnalyzing(true);
     setResult(null);
+    setError(null);
 
-    setTimeout(() => {
-      const analysisResult = analyzeJob(input);
-      setResult(analysisResult);
+    try {
+      const response = await fetch(`${API_URL}/analyze`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ job_text: input }),
+      });
+
+      if (!response.ok) {
+        let errMsg = 'Failed to analyze the job posting.';
+        try {
+          const errData = await response.json();
+          if (errData && errData.detail) {
+            errMsg = typeof errData.detail === 'string' ? errData.detail : JSON.stringify(errData.detail);
+          }
+        } catch {
+          // Fallback if response isn't JSON
+        }
+        throw new Error(errMsg);
+      }
+
+      const data = await response.json();
+      
+      // Map backend response fields to the frontend AnalysisResult interface
+      const statusMap: Record<string, ResultStatus> = {
+        'Genuine': 'genuine',
+        'Suspicious': 'suspicious',
+        'Fraudulent': 'fraudulent'
+      };
+
+      const recommendationMap: Record<string, string> = {
+        'Genuine': 'Safe to Apply',
+        'Suspicious': 'Review Carefully',
+        'Fraudulent': 'Do Not Apply'
+      };
+
+      setResult({
+        fraudScore: data.fraud_score,
+        status: statusMap[data.result] || 'genuine',
+        riskLevel: data.risk_level as RiskLevel,
+        reasons: data.reasons,
+        recommendation: recommendationMap[data.result] || 'Safe to Apply',
+        detailedRecommendation: data.recommendation
+      });
+    } catch (err: any) {
+      setError(err.message || 'An unexpected error occurred. Please ensure the backend is running and try again.');
+    } finally {
       setIsAnalyzing(false);
-    }, 1500);
+    }
   };
 
   const handleReset = () => {
     setInput('');
     setResult(null);
+    setError(null);
   };
 
   return (
@@ -66,11 +117,25 @@ function App() {
               <div className="bg-neutral-50 rounded-2xl border border-neutral-200 p-4">
                 <textarea
                   value={input}
-                  onChange={(e) => setInput(e.target.value)}
+                  onChange={(e) => {
+                    setInput(e.target.value);
+                    if (error) setError(null);
+                  }}
                   placeholder="Paste the job description, advertisement, or job posting here..."
                   className="w-full bg-transparent resize-none text-neutral-800 placeholder:text-neutral-400 focus:outline-none min-h-[200px] text-base leading-relaxed"
                   disabled={isAnalyzing}
                 />
+                
+                {error && (
+                  <div className="flex items-start gap-2.5 p-3.5 mt-2 bg-red-50 border border-red-200 rounded-xl text-red-800 text-sm">
+                    <XCircle className="w-5 h-5 text-red-500 flex-shrink-0 mt-0.5" />
+                    <div className="flex-1">
+                      <p className="font-semibold">Analysis Error</p>
+                      <p className="text-red-700/90 mt-0.5">{error}</p>
+                    </div>
+                  </div>
+                )}
+
                 <div className="flex items-center justify-between pt-4 border-t border-neutral-200 mt-4">
                   <p className="text-xs text-neutral-400">
                     Include job title, company, salary, and contact info
@@ -225,9 +290,7 @@ function ResultCard({ result }: { result: AnalysisResult }) {
           {result.recommendation}
         </p>
         <p className="text-sm text-neutral-500 mt-2">
-          {result.recommendation === 'Safe to Apply' && 'No significant red flags detected. You can proceed with your application.'}
-          {result.recommendation === 'Review Carefully' && 'Some concerns detected. Verify company details before applying.'}
-          {result.recommendation === 'Do Not Apply' && 'Multiple fraud indicators found. Do not share personal information.'}
+          {result.detailedRecommendation}
         </p>
       </div>
     </div>
@@ -263,139 +326,6 @@ function CircularProgress({ value, color }: { value: number; color: string }) {
       </div>
     </div>
   );
-}
-
-function analyzeJob(text: string): AnalysisResult {
-  const content = text.toLowerCase();
-  let score = 0;
-  const reasons: string[] = [];
-
-  // Check for registration/processing fees
-  if (
-    content.includes('registration fee') ||
-    content.includes('processing fee') ||
-    content.includes('training fee') ||
-    content.includes('upfront payment') ||
-    content.includes('advance fee')
-  ) {
-    score += 25;
-    reasons.push('Registration or processing fee requested');
-  }
-
-  // Check for personal email
-  if (
-    content.includes('@gmail.com') ||
-    content.includes('@yahoo.com') ||
-    content.includes('@hotmail.com') ||
-    content.includes('@outlook.com')
-  ) {
-    score += 15;
-    reasons.push('Personal email address used instead of corporate domain');
-  }
-
-  // Check for unrealistic salary
-  if (content.includes('$') && content.includes('000')) {
-    const salaryMatches = content.match(/\$[\d,]+/g);
-    if (salaryMatches) {
-      const maxSalary = Math.max(...salaryMatches.map(s => parseInt(s.replace(/[^0-9]/g, ''))));
-      if (maxSalary > 100000 && (content.includes('no experience') || content.includes('entry level') || content.includes('beginner'))) {
-        score += 20;
-        reasons.push('Unrealistic salary for listed experience requirements');
-      }
-    }
-  }
-
-  // Check for guaranteed income
-  if (content.includes('guaranteed income') || content.includes('guaranteed salary')) {
-    score += 20;
-    reasons.push('Guaranteed income promises - common scam tactic');
-  }
-
-  // Check for urgency
-  if (
-    content.includes('urgent') ||
-    content.includes('immediate start') ||
-    content.includes('act now') ||
-    content.includes('limited time') ||
-    content.includes('apply now')
-  ) {
-    score += 15;
-    reasons.push('Urgency tactics to pressure quick decisions');
-  }
-
-  // Check for work from home + no experience
-  if (content.includes('work from home') && content.includes('no experience')) {
-    score += 20;
-    reasons.push('Work from home with no experience required - common scam pattern');
-  }
-
-  // Check for wire transfer/check mentions
-  if (
-    content.includes('wire transfer') ||
-    content.includes('western union') ||
-    content.includes('moneygram') ||
-    content.includes('cash check') ||
-    content.includes('deposit check')
-  ) {
-    score += 30;
-    reasons.push('Payment transfer requests - major fraud indicator');
-  }
-
-  // Check for personal info requests
-  if (
-    content.includes('ssn') ||
-    content.includes('social security') ||
-    content.includes('bank account') ||
-    content.includes('credit card') ||
-    content.includes('copy of id')
-  ) {
-    score += 25;
-    reasons.push('Requests for sensitive personal information');
-  }
-
-  // Check for vague company
-  if (!content.includes('@') && content.includes('we are hiring')) {
-    score += 10;
-    reasons.push('Vague company information provided');
-  }
-
-  // Normalize score
-  score = Math.min(100, Math.max(0, score));
-
-  // Determine status, risk level, and recommendation
-  let status: ResultStatus;
-  let riskLevel: RiskLevel;
-  let recommendation: string;
-
-  if (score < 30) {
-    status = 'genuine';
-    riskLevel = 'Low';
-    recommendation = 'Safe to Apply';
-  } else if (score < 60) {
-    status = 'suspicious';
-    riskLevel = 'Medium';
-    recommendation = 'Review Carefully';
-  } else {
-    status = 'fraudulent';
-    riskLevel = 'High';
-    recommendation = 'Do Not Apply';
-  }
-
-  // Add positive reasons for genuine jobs
-  if (reasons.length === 0 && score < 30) {
-    reasons.push('No registration or processing fees requested');
-    reasons.push('Professional job posting format');
-    reasons.push('No suspicious urgency tactics detected');
-    reasons.push('Realistic job requirements and expectations');
-  }
-
-  return {
-    fraudScore: score,
-    status,
-    riskLevel,
-    reasons,
-    recommendation,
-  };
 }
 
 export default App;
